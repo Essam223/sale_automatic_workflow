@@ -44,25 +44,16 @@ class AutomaticWorkflowJob(models.Model):
         ' invoices, pickings...'
     )
 
-    def _do_validate_sale_order(self, sale):
-        """Validate a sales order"""
-        with savepoint(self.env.cr), force_company(self.env, sale.company_id):
-            sale.action_confirm()
-
     @api.model
     def _validate_sale_orders(self, order_filter):
+        print(order_filter)
         sale_obj = self.env['sale.order']
         sales = sale_obj.search(order_filter)
         _logger.debug('Sale Orders to validate: %s', sales.ids)
         for sale in sales:
-            self._do_validate_sale_order(sale)
-
-    def _do_create_invoice(self, sale):
-        """Create an invoice for a sales order"""
-        with savepoint(self.env.cr), force_company(self.env, sale.company_id):
-            payment = self.env['sale.advance.payment.inv'].create(
-                {'advance_payment_method': 'all'})
-            payment.with_context(active_ids=sale.ids).create_invoices()
+            with savepoint(self.env.cr), force_company(self.env,
+                                                       sale.company_id):
+                sale.action_confirm()
 
     @api.model
     def _create_invoices(self, create_filter):
@@ -70,16 +61,11 @@ class AutomaticWorkflowJob(models.Model):
         sales = sale_obj.search(create_filter)
         _logger.debug('Sale Orders to create Invoice: %s', sales.ids)
         for sale in sales:
-            self._do_create_invoice(sale)
-
-    def _do_validate_invoice(self, invoice):
-        """Validate an invoice"""
-        with savepoint(self.env.cr), force_company(self.env,
-                                                   invoice.company_id):
-            # FIX Why is this needed for certain invoices
-            # in enterprise in multicompany?
-            invoice.with_context(
-                force_company=invoice.company_id.id).action_invoice_open()
+            with savepoint(self.env.cr), force_company(self.env,
+                                                       sale.company_id):
+                payment = self.env['sale.advance.payment.inv'].create(
+                    {'advance_payment_method': 'all'})
+                payment.with_context(active_ids=sale.ids).create_invoices()
 
     @api.model
     def _validate_invoices(self, validate_invoice_filter):
@@ -87,12 +73,12 @@ class AutomaticWorkflowJob(models.Model):
         invoices = invoice_obj.search(validate_invoice_filter)
         _logger.debug('Invoices to validate: %s', invoices.ids)
         for invoice in invoices:
-            self._do_validate_invoice(invoice)
-
-    def _do_validate_picking(self, picking):
-        """Validate a stock.picking"""
-        with savepoint(self.env.cr):
-            picking.validate_picking()
+            with savepoint(self.env.cr), force_company(self.env,
+                                                       invoice.company_id):
+                # FIX Why is this needed for certain invoices
+                # in enterprise in multicompany?
+                invoice.with_context(
+                    force_company=invoice.company_id.id).action_invoice_open()
 
     @api.model
     def _validate_pickings(self, picking_filter):
@@ -100,12 +86,8 @@ class AutomaticWorkflowJob(models.Model):
         pickings = picking_obj.search(picking_filter)
         _logger.debug('Pickings to validate: %s', pickings.ids)
         for picking in pickings:
-            self._do_validate_picking(picking)
-
-    def _do_sale_done(self, sale):
-        """Set a sales order to done"""
-        with savepoint(self.env.cr), force_company(self.env, sale.company_id):
-            sale.action_done()
+            with savepoint(self.env.cr):
+                picking.validate_picking()
 
     @api.model
     def _sale_done(self, sale_done_filter):
@@ -113,38 +95,88 @@ class AutomaticWorkflowJob(models.Model):
         sales = sale_obj.search(sale_done_filter)
         _logger.debug('Sale Orders to done: %s', sales.ids)
         for sale in sales:
-            self._do_sale_done(sale)
+            with savepoint(self.env.cr), force_company(self.env,
+                                                       sale.company_id):
+                sale.action_done()
 
     @api.model
     def run_with_workflow(self, sale_workflow):
+        print("i am inside run with workflow")
+        # print("order_filter_id : ",sale_workflow.order_filter_id.domain)
         workflow_domain = [('workflow_process_id', '=', sale_workflow.id)]
+        # print("workflow_domain : ", workflow_domain)
         if sale_workflow.validate_order:
-            self._validate_sale_orders(
+            self._validate_sale_orders(sale_workflow,
                 safe_eval(sale_workflow.order_filter_id.domain) +
                 workflow_domain)
         if sale_workflow.validate_picking:
-            self._validate_pickings(
+            self._validate_pickings(sale_workflow,
                 safe_eval(sale_workflow.picking_filter_id.domain) +
                 workflow_domain)
         if sale_workflow.create_invoice:
-            self._create_invoices(
+            self._create_invoices(sale_workflow,
                 safe_eval(sale_workflow.create_invoice_filter_id.domain) +
                 workflow_domain)
         if sale_workflow.validate_invoice:
-            self._validate_invoices(
+            self._validate_invoices(sale_workflow,
                 safe_eval(
                     sale_workflow.validate_invoice_filter_id.domain) +
                 workflow_domain)
         if sale_workflow.sale_done:
-            self._sale_done(
+            self._sale_done(sale_workflow,
                 safe_eval(
                     sale_workflow.sale_done_filter_id.domain) +
                 workflow_domain)
 
     @api.model
     def run(self):
+        # print("i am inside run")
         """ Must be called from ir.cron """
         sale_workflow_process = self.env['sale.workflow.process']
+        print(sale_workflow_process)
         for sale_workflow in sale_workflow_process.search([]):
             self.run_with_workflow(sale_workflow)
         return True
+
+
+class ActionConfirm(models.Model):
+    _inherit = 'sale.order'
+
+    @api.multi
+    def action_confirm(self):
+        #confirm order
+        super(ActionConfirm, self).action_confirm()
+        # auto delivery order
+        picking_obj = self.env['stock.picking']
+        pickings = picking_obj.search([('sale_id', '=', self.id)])
+        print('Pickings to validate: %s', pickings.ids)
+        for picking in pickings:
+            with savepoint(self.env.cr):
+                picking.validate_picking()
+        # auto create invoice
+        sale_obj = self.env['sale.order']
+        sales = sale_obj.search([('id', '=', self.id)])
+        print('Sale Orders to create Invoice: %s', sales.ids)
+        for sale in sales:
+            with savepoint(self.env.cr), force_company(self.env,
+                                                       sale.company_id):
+                payment = self.env['sale.advance.payment.inv'].create(
+                    {'advance_payment_method': 'all'})
+                payment.with_context(active_ids=sale.ids).create_invoices()
+
+        # auto validate invoice
+        invoice_obj = self.env['account.invoice']
+        print([('origin', '=', self.name)])
+        invoices = invoice_obj.search([('origin', '=', self.name)])
+        print('Invoices to validate: %s', invoices.ids)
+        for invoice in invoices:
+            with savepoint(self.env.cr), force_company(self.env,
+                                                       invoice.company_id):
+                invoice.with_context(
+                    force_company=invoice.company_id.id).action_invoice_open()
+
+        # print('I am here')
+        # print(self.workflow_process_id)
+        # AutomaticWorkflowJob.run_with_workflow(AutomaticWorkflowJob,self.workflow_process_id)
+        # return super(ActionConfirm, self).action_confirm()
+
