@@ -1,5 +1,5 @@
 {
-    'name': 'Sale Automatic Workflow',
+    'name': 'Sale Automatic Confirm',
     'version': '12.0.1.0.0',
     'category': 'Sales Management',
     'license': 'AGPL-3',
